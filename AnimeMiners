@@ -32,6 +32,7 @@ local Remotes        = ReplicatedStorage:WaitForChild("Remotes")
 local GamestateEvent = Remotes:WaitForChild("GamestateEvent")
 local GameState      = require(ReplicatedStorage:WaitForChild("Modules"):WaitForChild("GameState"))
 local MineConfig     = require(ReplicatedStorage.Modules:WaitForChild("MineConfig"))
+local Items          = require(ReplicatedStorage.Modules:WaitForChild("Items"))
 
 local SELL_RANGE     = 12      -- server's own prompt range is 14
 local SELL_OFFSET    = 4       -- how far in front of the buyer we land
@@ -106,6 +107,8 @@ local State = {
     AutoPickaxe  = false,   -- buy + equip the best unlocked pickaxe
     PickaxesBought = 0,
     AutoBuy      = false,
+    UpgradeMiners = false,  -- include crew Damage/Speed/Mining levels
+    PowerGoal    = nil,     -- lowest team-power gate blocking a skill node
     BuyInterval  = 1.5,
     Bought       = 0,
     Spent        = 0,
@@ -197,10 +200,74 @@ local function coreFamilyOpen(mine, family)
     return false
 end
 
+-- ── Crew (miner) upgrades ───────────────────────────────────────
+--   GamestateEvent:FireServer("MineUpgradeCharacter", slot, kind)
+--   kind = "Damage" | "Speed" | "MineSpeed"   (slot = "M1".."M8")
+-- Only Damage raises team power (the MinePower attribute), which is what
+-- gates Density / Colossus skill nodes. Verified live: Speed and
+-- MineSpeed leave MinePower untouched.
+local CREW_KINDS = {
+    { kind = "Damage",    field = "CharLevel",          cost = "GetCharacterUpgradeCost",
+      label = "dmg" },
+    { kind = "Speed",     field = "CharSpeedLevel",     cost = "GetCharacterSpeedUpgradeCost",
+      label = "speed",  cap = "CharSpeedMaxLevel" },
+    { kind = "MineSpeed", field = "CharMineSpeedLevel", cost = "GetCharacterMineSpeedUpgradeCost",
+      label = "mining", cap = "CharMineSpeedMaxLevel" },
+}
+
+local function teamPower()
+    return tonumber(lp:GetAttribute("MinePower")) or 0
+end
+
+local function crewCandidates(mine, out, now)
+    for slot, h in pairs(mine.Holders or {}) do
+        if type(h) == "table" and h.CharName and h.CharName ~= "" then
+            local okI, item = pcall(Items.GetItemData, h.CharName)
+            if okI and type(item) == "table" then
+                local okB, base = pcall(MineConfig.GetHolderBaseDamage, h, item)
+                base = (okB and tonumber(base)) or 0
+                for _, k in ipairs(CREW_KINDS) do
+                    local key   = "crew:" .. slot .. ":" .. k.kind
+                    local level = tonumber(h[k.field]) or 1
+                    local cap
+                    if k.cap then
+                        cap = tonumber(MineConfig[k.cap])
+                    else
+                        local okC, c = pcall(MineConfig.GetCharLevelCap, item)
+                        cap = okC and tonumber(c) or nil
+                    end
+                    if (State.Cooldown[key] or 0) <= now and (not cap or level < cap) then
+                        local okP, cost = pcall(MineConfig[k.cost], level, item)
+                        if okP and type(cost) == "number" and cost > 0 then
+                            local field, kind = k.field, k.kind
+                            table.insert(out, {
+                                key   = key,
+                                cost  = cost,
+                                label = string.format("%s %s %s L%d", slot, tostring(h.CharName), k.label, level + 1),
+                                -- each Damage level adds +0.25x of base damage
+                                power = (kind == "Damage") and base * 0.25 or nil,
+                                fire  = function()
+                                    GamestateEvent:FireServer("MineUpgradeCharacter", slot, kind)
+                                end,
+                                level = function(m)
+                                    local hh = m.Holders and m.Holders[slot]
+                                    return hh and tonumber(hh[field]) or 0
+                                end,
+                            })
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
 --- Every upgrade that is unlocked, not maxed and not cooling down,
---- cheapest first.
+--- cheapest first. Skill nodes gated behind team power we don't have yet
+--- are held back; the smallest such gate is returned as the power goal.
 local function buyCandidates(mine)
     local out, now = {}, os.clock()
+    local power, powerGoal = teamPower(), nil
 
     for id, upg in pairs(MineConfig.CoreUpgradeById) do
         local key   = "core:" .. id
@@ -234,7 +301,13 @@ local function buyCandidates(mine)
                         local family = node.Family
                         local lvl    = tonumber(skills[family]) or 0
                         local ok3, cost = pcall(MineConfig.GetSkillCost, zone, lvl, family)
-                        if ok3 and type(cost) == "number" then
+                        -- Team-power gate for the level this purchase reaches
+                        -- (only NodeLevel / BigNode families have one).
+                        local okR, req = pcall(MineConfig.GetSkillPowerReq, zone, family, lvl + 1)
+                        local gated = okR and type(req) == "number" and power < req
+                        if gated then
+                            if not powerGoal or req < powerGoal then powerGoal = req end
+                        elseif ok3 and type(cost) == "number" then
                             table.insert(out, {
                                 key   = key,
                                 cost  = cost,
@@ -254,8 +327,10 @@ local function buyCandidates(mine)
         end
     end
 
+    if State.UpgradeMiners then crewCandidates(mine, out, now) end
+
     table.sort(out, function(a, b) return a.cost < b.cost end)
-    return out
+    return out, powerGoal
 end
 
 -- ── Auto Buy Best Pickaxe ───────────────────────────────────────
@@ -348,19 +423,37 @@ local function buyBestPickaxe()
     return "refused", best, have, holders
 end
 
---- Buy the cheapest affordable upgrade. Confirms the level actually went
---- up; anything the server refuses (prereq, team power, etc.) is parked
---- for REFUSE_COOLDOWN seconds so it is not spammed.
---- Returns bought, candidate, refused.
+--- Pick and buy one upgrade, balanced:
+---   * normally the cheapest affordable thing in the whole pool
+---   * but while a skill node is gated on team power we don't have, the
+---     Damage level with the best power-per-coin goes first
+--- Confirms the level actually went up; anything the server refuses is
+--- parked for REFUSE_COOLDOWN seconds so it is not spammed.
+--- Returns bought, candidate, refused, pushingPower.
 local function buyOne()
     local d = getData()
     local mine = d and d.MineGame
     if not mine then return false end
 
     local money = tonumber(d.Money) or 0
-    local list  = buyCandidates(mine)
-    local c = list[1]
-    if not c or c.cost > money then return false end
+    local list, powerGoal = buyCandidates(mine)
+    State.PowerGoal = powerGoal
+
+    local c, pushing
+    if powerGoal and State.UpgradeMiners and teamPower() < powerGoal then
+        local bestScore
+        for _, x in ipairs(list) do
+            if x.power and x.power > 0 and x.cost <= money then
+                local score = x.power / x.cost
+                if not bestScore or score > bestScore then bestScore, c = score, x end
+            end
+        end
+        pushing = c ~= nil
+    end
+    if not c then
+        c = list[1]   -- sorted ascending: first is cheapest
+        if not c or c.cost > money then return false end
+    end
 
     local before = c.level(mine)
     c.fire()
@@ -371,11 +464,11 @@ local function buyOne()
     if after > before then
         State.Bought = State.Bought + 1
         State.Spent  = State.Spent + c.cost
-        return true, c, false
+        return true, c, false, pushing
     end
 
     State.Cooldown[c.key] = os.clock() + REFUSE_COOLDOWN
-    return false, c, true
+    return false, c, true, pushing
 end
 
 -- ════════════════════════════════════════════════════════════════
@@ -408,7 +501,7 @@ local function corner(p, r)
     local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r); c.Parent = p; return c
 end
 
-local PANEL_H = 512
+local PANEL_H = 480   -- body scrolls if the toggles don't all fit
 
 local Panel = Instance.new("Frame")
 Panel.Name             = "Panel"
@@ -466,12 +559,23 @@ Min.Parent                 = Header
 corner(Min, 7)
 
 -- Body
-local Body = Instance.new("Frame")
+local Body = Instance.new("ScrollingFrame")
 Body.Name                   = "Body"
-Body.Size                   = UDim2.new(1, -24, 1, -52)
+Body.Size                   = UDim2.new(1, -16, 1, -52)
 Body.Position               = UDim2.fromOffset(12, 48)
 Body.BackgroundTransparency = 1
+Body.BorderSizePixel        = 0
+Body.ScrollBarThickness     = 3
+Body.ScrollBarImageColor3   = COL.dim
+Body.CanvasSize             = UDim2.new()
+Body.AutomaticCanvasSize    = Enum.AutomaticSize.Y
+Body.ScrollingDirection     = Enum.ScrollingDirection.Y
 Body.Parent                 = Panel
+
+local BodyPad = Instance.new("UIPadding")
+BodyPad.PaddingRight = UDim.new(0, 8)
+BodyPad.PaddingBottom = UDim.new(0, 8)
+BodyPad.Parent = Body
 
 local L = Instance.new("UIListLayout")
 L.SortOrder = Enum.SortOrder.LayoutOrder
@@ -548,7 +652,7 @@ end
 
 -- Stats
 local StatBox = Instance.new("Frame")
-StatBox.Size             = UDim2.new(1, 0, 0, 96)
+StatBox.Size             = UDim2.new(1, 0, 0, 112)
 StatBox.BackgroundColor3 = COL.panel
 StatBox.BorderSizePixel  = 0
 StatBox.LayoutOrder      = 10
@@ -579,6 +683,7 @@ local StatSell  = statLine(2)
 local StatCash  = statLine(3)
 local StatBuy   = statLine(4)
 local StatPick  = statLine(5)
+local StatPower = statLine(6)
 
 local Status = Instance.new("TextLabel")
 Status.Size                   = UDim2.new(1, 0, 0, 16)
@@ -616,6 +721,13 @@ local function refreshStats()
         end
     end
     StatPick.Text = pickText
+
+    if State.PowerGoal and teamPower() < State.PowerGoal then
+        StatPower.Text = string.format("Team power    %s  next gate %s",
+            abbreviate(teamPower()), abbreviate(State.PowerGoal))
+    else
+        StatPower.Text = string.format("Team power    %s", abbreviate(teamPower()))
+    end
 end
 
 -- ════════════════════════════════════════════════════════════════
@@ -672,10 +784,15 @@ task.spawn(function()
     while true do
         local fast = false
         if State.AutoBuy then
-            local ok, bought, c, refused = pcall(buyOne)
+            local ok, bought, c, refused, pushing = pcall(buyOne)
             if ok and bought then
                 fast = true   -- chain purchases while money lasts
-                setStatus(string.format("bought %s  -$%s", c.label, abbreviate(c.cost)), COL.buy)
+                if pushing and State.PowerGoal then
+                    setStatus(string.format("power %s/%s: %s", abbreviate(teamPower()),
+                        abbreviate(State.PowerGoal), c.label), COL.buy)
+                else
+                    setStatus(string.format("bought %s  -$%s", c.label, abbreviate(c.cost)), COL.buy)
+                end
             elseif ok and refused then
                 setStatus(string.format("%s refused, retry in %ds", c.label, REFUSE_COOLDOWN), COL.travel)
             end
@@ -750,7 +867,12 @@ makeToggle("Auto Buy Upgrades", "tap, slots, skill tree — cheapest first", 5, 
     setStatus(on and "auto buy running" or "auto buy off", on and COL.buy or COL.dim)
 end)
 
-makeToggle("Auto Best Pickaxe", "buy best unlocked, onto every miner", 6, COL.buy, false, function(on)
+makeToggle("Upgrade Miners", "levels crew; pushes power for gated nodes", 6, COL.buy, false, function(on)
+    State.UpgradeMiners = on
+    setStatus(on and "miners join the upgrade pool" or "miners left out of upgrades", on and COL.buy or COL.dim)
+end)
+
+makeToggle("Auto Best Pickaxe", "buy best unlocked, onto every miner", 7, COL.buy, false, function(on)
     State.AutoPickaxe = on
     setStatus(on and "auto pickaxe running" or "auto pickaxe off", on and COL.buy or COL.dim)
 end)
