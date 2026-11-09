@@ -107,12 +107,12 @@ local State = {
     Sells        = 0,
     Earned       = 0,
     Busy         = false,   -- guards the travel hop
-    AutoEquip    = false,   -- MineEquipBest after each chest loot
+    AutoEquip    = true,    -- MineEquipBest after each chest loot
     LastEquip    = 0,
-    AutoPickaxe  = false,   -- buy + equip the best unlocked pickaxe
+    AutoPickaxe  = true,    -- buy + equip the best unlocked pickaxe
     PickaxesBought = 0,
-    AutoBuy      = false,
-    UpgradeMiners = false,  -- include crew Damage/Speed/Mining levels
+    AutoBuy      = true, 
+    UpgradeMiners = true,   -- include crew Damage/Speed/Mining levels
     PowerGoal    = nil,     -- lowest team-power gate blocking a skill node
     BuyInterval  = 1.5,
     Bought       = 0,
@@ -860,7 +860,7 @@ makeToggle("Auto Loot Chest", "works anywhere on the map", 1, COL.loot, true, fu
     setStatus(on and "auto loot running" or "auto loot off", on and COL.loot or COL.dim)
 end)
 
-makeToggle("Auto Equip Best", "after each chest loot", 2, COL.loot, false, function(on)
+makeToggle("Auto Equip Best", "after each chest loot", 2, COL.loot, true, function(on)
     State.AutoEquip = on
     setStatus(on and "will equip best after looting" or "auto equip off", on and COL.loot or COL.dim)
 end)
@@ -875,17 +875,17 @@ makeToggle("Travel to Buyer", "hop there, sell, hop back", 4, COL.travel, true, 
     setStatus(on and "will travel to sell" or "will only sell in range", COL.travel)
 end)
 
-makeToggle("Auto Buy Upgrades", "tap, slots, skill tree — cheapest first", 5, COL.buy, false, function(on)
+makeToggle("Auto Buy Upgrades", "tap, slots, skill tree — cheapest first", 5, COL.buy, true, function(on)
     State.AutoBuy = on
     setStatus(on and "auto buy running" or "auto buy off", on and COL.buy or COL.dim)
 end)
 
-makeToggle("Upgrade Miners", "levels crew; pushes power for gated nodes", 6, COL.buy, false, function(on)
+makeToggle("Upgrade Miners", "levels crew; pushes power for gated nodes", 6, COL.buy, true, function(on)
     State.UpgradeMiners = on
     setStatus(on and "miners join the upgrade pool" or "miners left out of upgrades", on and COL.buy or COL.dim)
 end)
 
-makeToggle("Auto Best Pickaxe", "buy best unlocked, onto every miner", 7, COL.buy, false, function(on)
+makeToggle("Auto Best Pickaxe", "buy best unlocked, onto every miner", 7, COL.buy, true, function(on)
     State.AutoPickaxe = on
     setStatus(on and "auto pickaxe running" or "auto pickaxe off", on and COL.buy or COL.dim)
 end)
