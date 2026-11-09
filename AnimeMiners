@@ -1,1 +1,498 @@
+-- AnimeMiners Enhanced Script
+-- Auto Loot Chest + Auto Sell
+-- by BumpyV2 | github.com/BumpyV2/Anime-miners
 
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+
+local lp = Players.LocalPlayer
+local character = lp.Character or lp.CharacterAdded:Wait()
+local rootPart = character:WaitForChild("HumanoidRootPart")
+
+-- Wait for character respawn
+lp.CharacterAdded:Connect(function(char)
+    character = char
+    rootPart = char:WaitForChild("HumanoidRootPart")
+end)
+
+-- Remotes
+local Remotes = game.ReplicatedStorage:WaitForChild("Remotes")
+local SellItems = Remotes:WaitForChild("SellItems")
+
+-- GUI references
+local MineGui = lp.PlayerGui:WaitForChild("MineGui")
+local ChestFrame = MineGui:WaitForChild("ChestFrame")
+local SellFrame = MineGui:WaitForChild("SellFrame")
+
+-- ═══════════════════════════════════════════
+-- STATE
+-- ═══════════════════════════════════════════
+local State = {
+    AutoLootChest = false,
+    AutoSell = false,
+}
+
+-- ═══════════════════════════════════════════
+-- UI
+-- ═══════════════════════════════════════════
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AnimeMinersEnhanced"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = lp.PlayerGui
+
+-- Main frame
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 220, 0, 160)
+MainFrame.Position = UDim2.new(0, 16, 0.5, -80)
+MainFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Parent = ScreenGui
+
+local UICorner = Instance.new("UICorner")
+UICorner.CornerRadius = UDim.new(0, 10)
+UICorner.Parent = MainFrame
+
+local UIStroke = Instance.new("UIStroke")
+UIStroke.Color = Color3.fromRGB(80, 60, 160)
+UIStroke.Thickness = 1.5
+UIStroke.Parent = MainFrame
+
+-- Title bar
+local TitleBar = Instance.new("Frame")
+TitleBar.Name = "TitleBar"
+TitleBar.Size = UDim2.new(1, 0, 0, 36)
+TitleBar.BackgroundColor3 = Color3.fromRGB(80, 60, 160)
+TitleBar.BorderSizePixel = 0
+TitleBar.Parent = MainFrame
+
+local TitleBarCorner = Instance.new("UICorner")
+TitleBarCorner.CornerRadius = UDim.new(0, 10)
+TitleBarCorner.Parent = TitleBar
+
+-- Square bottom corners on title bar
+local TitleBarFill = Instance.new("Frame")
+TitleBarFill.Size = UDim2.new(1, 0, 0.5, 0)
+TitleBarFill.Position = UDim2.new(0, 0, 0.5, 0)
+TitleBarFill.BackgroundColor3 = Color3.fromRGB(80, 60, 160)
+TitleBarFill.BorderSizePixel = 0
+TitleBarFill.Parent = TitleBar
+
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Text = "⛏ AnimeMiners"
+TitleLabel.Size = UDim2.new(1, -10, 1, 0)
+TitleLabel.Position = UDim2.new(0, 10, 0, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+TitleLabel.TextSize = 14
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.Parent = TitleBar
+
+-- Content area
+local ContentFrame = Instance.new("Frame")
+ContentFrame.Size = UDim2.new(1, -20, 1, -50)
+ContentFrame.Position = UDim2.new(0, 10, 0, 44)
+ContentFrame.BackgroundTransparency = 1
+ContentFrame.Parent = MainFrame
+
+local UIListLayout = Instance.new("UIListLayout")
+UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+UIListLayout.Padding = UDim.new(0, 10)
+UIListLayout.Parent = ContentFrame
+
+-- Status label
+local StatusLabel = Instance.new("TextLabel")
+StatusLabel.Name = "Status"
+StatusLabel.Size = UDim2.new(1, 0, 0, 16)
+StatusLabel.BackgroundTransparency = 1
+StatusLabel.Text = "Ready"
+StatusLabel.TextColor3 = Color3.fromRGB(120, 120, 140)
+StatusLabel.TextSize = 11
+StatusLabel.Font = Enum.Font.Gotham
+StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+StatusLabel.LayoutOrder = 99
+StatusLabel.Parent = ContentFrame
+
+local function setStatus(msg)
+    StatusLabel.Text = msg
+end
+
+-- Toggle button builder
+local function createToggle(name, label, layoutOrder, onToggle)
+    local Row = Instance.new("Frame")
+    Row.Name = name .. "Row"
+    Row.Size = UDim2.new(1, 0, 0, 36)
+    Row.BackgroundColor3 = Color3.fromRGB(28, 28, 36)
+    Row.BorderSizePixel = 0
+    Row.LayoutOrder = layoutOrder
+    Row.Parent = ContentFrame
+
+    local RowCorner = Instance.new("UICorner")
+    RowCorner.CornerRadius = UDim.new(0, 8)
+    RowCorner.Parent = Row
+
+    local RowLabel = Instance.new("TextLabel")
+    RowLabel.Size = UDim2.new(1, -56, 1, 0)
+    RowLabel.Position = UDim2.new(0, 10, 0, 0)
+    RowLabel.BackgroundTransparency = 1
+    RowLabel.Text = label
+    RowLabel.TextColor3 = Color3.fromRGB(210, 210, 220)
+    RowLabel.TextSize = 13
+    RowLabel.Font = Enum.Font.Gotham
+    RowLabel.TextXAlignment = Enum.TextXAlignment.Left
+    RowLabel.Parent = Row
+
+    local ToggleBtn = Instance.new("TextButton")
+    ToggleBtn.Name = "Toggle"
+    ToggleBtn.Size = UDim2.new(0, 44, 0, 24)
+    ToggleBtn.Position = UDim2.new(1, -50, 0.5, -12)
+    ToggleBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
+    ToggleBtn.BorderSizePixel = 0
+    ToggleBtn.Text = ""
+    ToggleBtn.Parent = Row
+
+    local BtnCorner = Instance.new("UICorner")
+    BtnCorner.CornerRadius = UDim.new(1, 0)
+    BtnCorner.Parent = ToggleBtn
+
+    local Knob = Instance.new("Frame")
+    Knob.Name = "Knob"
+    Knob.Size = UDim2.new(0, 18, 0, 18)
+    Knob.Position = UDim2.new(0, 3, 0.5, -9)
+    Knob.BackgroundColor3 = Color3.fromRGB(160, 160, 180)
+    Knob.BorderSizePixel = 0
+    Knob.Parent = ToggleBtn
+
+    local KnobCorner = Instance.new("UICorner")
+    KnobCorner.CornerRadius = UDim.new(1, 0)
+    KnobCorner.Parent = Knob
+
+    local enabled = false
+    local function setState(val)
+        enabled = val
+        local goal = enabled
+            and {BackgroundColor3 = Color3.fromRGB(80, 60, 160), Position = UDim2.new(0, 23, 0.5, -9)}
+            or  {BackgroundColor3 = Color3.fromRGB(50, 50, 60),  Position = UDim2.new(0, 3,  0.5, -9)}
+        TweenService:Create(ToggleBtn, TweenInfo.new(0.15), {BackgroundColor3 = goal.BackgroundColor3}):Play()
+        TweenService:Create(Knob, TweenInfo.new(0.15), {Position = goal.Position}):Play()
+        onToggle(enabled)
+    end
+
+    ToggleBtn.MouseButton1Click:Connect(function()
+        setState(not enabled)
+    end)
+
+    return setState
+end
+
+-- ═══════════════════════════════════════════
+-- AUTO LOOT CHEST
+-- ═══════════════════════════════════════════
+local function findChestPrompt()
+    -- Check the main MinePlot chest
+    for _, plot in ipairs(workspace.MineWorld.Plots:GetChildren()) do
+        local chest = plot:FindFirstChild("Chest")
+        if chest then
+            local pp = chest:FindFirstChild("ChestPrompt")
+            if pp and pp:IsA("ProximityPrompt") then
+                return pp, chest
+            end
+        end
+    end
+    -- Also scan workspace Loot folder for spawned chests
+    local lootFolder = workspace.MineWorld.Plots:FindFirstChild("MinePlot1")
+    if lootFolder then
+        local loot = lootFolder:FindFirstChild("Loot")
+        if loot then
+            for _, item in ipairs(loot:GetChildren()) do
+                local pp = item:FindFirstChildWhichIsA("ProximityPrompt")
+                if pp then return pp, item end
+            end
+        end
+    end
+    return nil, nil
+end
+
+local function triggerProximityPrompt(pp)
+    -- Fire the prompt via the ProximityPromptService
+    local pps = game:GetService("ProximityPromptService")
+    -- We use the internal trigger approach
+    local ok, err = pcall(function()
+        fireproximityprompt(pp)
+    end)
+    if not ok then
+        -- Fallback: use the prompt's TriggerEnded event path
+        local ok2 = pcall(function()
+            pp.Triggered:Fire(lp)
+        end)
+    end
+end
+
+local function tryLootChest()
+    local pp, chest = findChestPrompt()
+    if not pp then return false end
+
+    -- Check we're close enough (MaxActivationDistance)
+    local maxDist = pp.MaxActivationDistance
+    local chestPos
+    if chest then
+        local ok, piv = pcall(function() return chest:GetPivot().Position end)
+        if ok then chestPos = piv end
+    end
+    if not chestPos then
+        local base = chest and (chest:FindFirstChild("ChestBase") or chest:FindFirstChildWhichIsA("BasePart"))
+        if base then chestPos = base.Position end
+    end
+
+    if chestPos and rootPart then
+        local dist = (rootPart.Position - chestPos).Magnitude
+        if dist > maxDist then
+            setStatus("Moving to chest...")
+            -- Teleport character to chest
+            local hrp = character and character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                hrp.CFrame = CFrame.new(chestPos + Vector3.new(0, 3, 0))
+                task.wait(0.3)
+            end
+        end
+    end
+
+    -- Trigger the prompt
+    local ok = pcall(fireproximityprompt, pp)
+    if ok then
+        setStatus("Looting chest...")
+        return true
+    end
+    return false
+end
+
+-- Auto Loot loop
+local autoLootThread = nil
+local function startAutoLoot()
+    if autoLootThread then return end
+    autoLootThread = task.spawn(function()
+        while State.AutoLootChest do
+            local success = tryLootChest()
+            if not success then
+                setStatus("No chest found, waiting...")
+            end
+
+            -- Also handle ChestFrame auto-take if it appears
+            if ChestFrame.Visible then
+                local takeBtn = ChestFrame:FindFirstChild("Content") and ChestFrame.Content:FindFirstChild("Actions") and ChestFrame.Content.Actions:FindFirstChild("TakeButton")
+                if takeBtn then
+                    task.wait(0.3)
+                    takeBtn:FireButton1Click()
+                    setStatus("Took chest items!")
+                end
+            end
+
+            task.wait(2)
+        end
+        autoLootThread = nil
+    end)
+end
+
+local function stopAutoLoot()
+    State.AutoLootChest = false
+    if autoLootThread then
+        task.cancel(autoLootThread)
+        autoLootThread = nil
+    end
+    setStatus("Auto Loot stopped")
+end
+
+-- Watch for ChestFrame to auto-click TakeButton
+ChestFrame:GetPropertyChangedSignal("Visible"):Connect(function()
+    if ChestFrame.Visible and State.AutoLootChest then
+        task.wait(0.4)
+        local actions = ChestFrame:FindFirstChild("Content") and ChestFrame.Content:FindFirstChild("Actions")
+        if actions then
+            local takeBtn = actions:FindFirstChild("TakeButton")
+            if takeBtn then
+                takeBtn:FireButton1Click()
+                setStatus("Auto-took chest items!")
+            end
+        end
+    end
+end)
+
+-- ═══════════════════════════════════════════
+-- AUTO SELL
+-- ═══════════════════════════════════════════
+local function findSellNPC()
+    -- The GingerbreadKeeper / SellStand
+    local sellStand = workspace:FindFirstChild("SellStand")
+    if sellStand then
+        for _, v in ipairs(sellStand:GetDescendants()) do
+            if v:IsA("ProximityPrompt") and v.Name == "SellPrompt" then
+                local npcPart = v.Parent
+                while npcPart and not npcPart:IsA("BasePart") do
+                    npcPart = npcPart.Parent
+                end
+                -- Use UpperTorso or any part position
+                local torso = sellStand:FindFirstChild("UpperTorso", true) or npcPart
+                return v, torso and torso.Position
+            end
+        end
+    end
+    -- Fallback: search workspace
+    for _, v in ipairs(workspace:GetDescendants()) do
+        if v:IsA("ProximityPrompt") and v.Name == "SellPrompt" then
+            local part = v.Parent
+            return v, part and part:IsA("BasePart") and part.Position
+        end
+    end
+    return nil, nil
+end
+
+local function doSell()
+    -- Method 1: fire SellItems remote directly (most reliable)
+    -- The game fires SellItems with no arguments (server handles which items are queued)
+    local ok = pcall(function()
+        SellItems:FireServer()
+    end)
+    if ok then
+        setStatus("Sold items!")
+        return true
+    end
+
+    -- Method 2: open SellFrame UI and click SelectAll + Sell
+    if SellFrame.Visible then
+        local content = SellFrame:FindFirstChild("Content")
+        if content then
+            local selectAll = content:FindFirstChild("SelectAllButton")
+            local sellBtn = content:FindFirstChild("SellButton")
+            if selectAll then selectAll:FireButton1Click() task.wait(0.2) end
+            if sellBtn then sellBtn:FireButton1Click() setStatus("Sold via UI!") return true end
+        end
+    end
+
+    return false
+end
+
+local function tryAutoSell()
+    local sellPP, sellPos = findSellNPC()
+    if not sellPP then
+        setStatus("Sell NPC not found")
+        return false
+    end
+
+    -- Teleport to NPC if too far
+    if sellPos and rootPart then
+        local dist = (rootPart.Position - sellPos).Magnitude
+        if dist > sellPP.MaxActivationDistance then
+            setStatus("Moving to sell NPC...")
+            local hrp = character and character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                hrp.CFrame = CFrame.new(sellPos + Vector3.new(0, 3, 4))
+                task.wait(0.4)
+            end
+        end
+    end
+
+    -- Trigger sell prompt to open the UI
+    pcall(fireproximityprompt, sellPP)
+    task.wait(0.5)
+
+    -- Now click SelectAll + Sell in the SellFrame
+    if SellFrame.Visible then
+        local content = SellFrame:FindFirstChild("Content")
+        if content then
+            local selectAll = content:FindFirstChild("SelectAllButton")
+            local sellBtn = content:FindFirstChild("SellButton")
+            if selectAll then
+                selectAll:FireButton1Click()
+                task.wait(0.25)
+            end
+            if sellBtn then
+                sellBtn:FireButton1Click()
+                setStatus("All items sold!")
+                -- Close frame
+                local close = SellFrame:FindFirstChild("Close")
+                if close then close:FireButton1Click() end
+                return true
+            end
+        end
+    end
+
+    -- Fallback: fire remote directly
+    return doSell()
+end
+
+local autoSellThread = nil
+local function startAutoSell()
+    if autoSellThread then return end
+    autoSellThread = task.spawn(function()
+        while State.AutoSell do
+            local ok = tryAutoSell()
+            if not ok then
+                -- Try direct remote as fallback
+                pcall(function() SellItems:FireServer() end)
+                setStatus("Sell attempt sent")
+            end
+            task.wait(5)
+        end
+        autoSellThread = nil
+    end)
+end
+
+local function stopAutoSell()
+    State.AutoSell = false
+    if autoSellThread then
+        task.cancel(autoSellThread)
+        autoSellThread = nil
+    end
+    setStatus("Auto Sell stopped")
+end
+
+-- Watch SellFrame visibility: if it opens and AutoSell is on, auto-click SelectAll + Sell
+SellFrame:GetPropertyChangedSignal("Visible"):Connect(function()
+    if SellFrame.Visible and State.AutoSell then
+        task.wait(0.3)
+        local content = SellFrame:FindFirstChild("Content")
+        if content then
+            local selectAll = content:FindFirstChild("SelectAllButton")
+            local sellBtn = content:FindFirstChild("SellButton")
+            if selectAll then selectAll:FireButton1Click() task.wait(0.2) end
+            if sellBtn then
+                sellBtn:FireButton1Click()
+                setStatus("Auto-sold all items!")
+                task.wait(0.3)
+                local close = SellFrame:FindFirstChild("Close")
+                if close then close:FireButton1Click() end
+            end
+        end
+    end
+end)
+
+-- ═══════════════════════════════════════════
+-- TOGGLES
+-- ═══════════════════════════════════════════
+createToggle("AutoLootChest", "🎁 Auto Loot Chest", 1, function(enabled)
+    State.AutoLootChest = enabled
+    if enabled then
+        setStatus("Auto Loot active")
+        startAutoLoot()
+    else
+        stopAutoLoot()
+    end
+end)
+
+createToggle("AutoSell", "💰 Auto Sell", 2, function(enabled)
+    State.AutoSell = enabled
+    if enabled then
+        setStatus("Auto Sell active")
+        startAutoSell()
+    else
+        stopAutoSell()
+    end
+end)
+
+setStatus("Ready — drag to move")
