@@ -31,6 +31,7 @@ local lp = Players.LocalPlayer
 local Remotes        = ReplicatedStorage:WaitForChild("Remotes")
 local GamestateEvent = Remotes:WaitForChild("GamestateEvent")
 local GameState      = require(ReplicatedStorage:WaitForChild("Modules"):WaitForChild("GameState"))
+local MineConfig     = require(ReplicatedStorage.Modules:WaitForChild("MineConfig"))
 
 local SELL_RANGE     = 12      -- server's own prompt range is 14
 local SELL_OFFSET    = 4       -- how far in front of the buyer we land
@@ -100,6 +101,11 @@ local State = {
     Sells        = 0,
     Earned       = 0,
     Busy         = false,   -- guards the travel hop
+    AutoBuy      = false,
+    BuyInterval  = 1.5,
+    Bought       = 0,
+    Spent        = 0,
+    Cooldown     = {},      -- upgrade key -> os.clock() it may be retried
 }
 
 -- ════════════════════════════════════════════════════════════════
@@ -165,6 +171,119 @@ local function sellOres()
     return okTrip, #keys, true
 end
 
+-- ── Auto Buy Upgrades ───────────────────────────────────────────
+-- The in-game "Upgrades" button opens the skill tree. Two kinds of
+-- purchase live there, both verified against the client's own buy path:
+--   core  : GamestateEvent:FireServer(CoreUpgradeById[id].Event)
+--           ("MineUpgradeTap", "MineBuyMinerSlot") — no arguments
+--   skills: GamestateEvent:FireServer("MineBuySkill", zone, family, nodeId)
+-- Costs come from the game's own config so we only fire when affordable.
+
+local CORE_LABEL = { Tap = "Tap damage", Slots = "Miner slot" }
+local REFUSE_COOLDOWN = 60
+
+local function coreFamilyOpen(mine, family)
+    for _, node in pairs(MineConfig.CoreNodeById) do
+        if node.Family == family then
+            local ok1, open  = pcall(MineConfig.IsCoreNodeOpen, mine, node)
+            local ok2, maxed = pcall(MineConfig.IsCoreNodeMaxed, mine, node)
+            if ok1 and ok2 and open and not maxed then return true end
+        end
+    end
+    return false
+end
+
+--- Every upgrade that is unlocked, not maxed and not cooling down,
+--- cheapest first.
+local function buyCandidates(mine)
+    local out, now = {}, os.clock()
+
+    for id, upg in pairs(MineConfig.CoreUpgradeById) do
+        local key   = "core:" .. id
+        local level = tonumber(mine[upg.Field]) or 0
+        if (State.Cooldown[key] or 0) <= now
+            and (not upg.Max or level < upg.Max)
+            and coreFamilyOpen(mine, id) then
+            local ok, cost = pcall(upg.Cost, level)
+            if ok and type(cost) == "number" then
+                table.insert(out, {
+                    key   = key,
+                    cost  = cost,
+                    label = CORE_LABEL[id] or id,
+                    fire  = function() GamestateEvent:FireServer(upg.Event) end,
+                    level = function(m) return tonumber(m[upg.Field]) or 0 end,
+                })
+            end
+        end
+    end
+
+    for zone, unlocked in pairs(mine.UnlockedZones or {}) do
+        local nodes = unlocked and MineConfig.ZoneSkillNodes[zone]
+        if nodes then
+            local skills = (mine.Skills and mine.Skills[zone]) or {}
+            for _, node in ipairs(nodes) do
+                local key = "skill:" .. zone .. ":" .. node.Id
+                if (State.Cooldown[key] or 0) <= now then
+                    local ok1, open  = pcall(MineConfig.IsSkillNodeOpen, skills, node)
+                    local ok2, maxed = pcall(MineConfig.IsSkillNodeMaxed, skills, node)
+                    if ok1 and ok2 and open and not maxed then
+                        local family = node.Family
+                        local lvl    = tonumber(skills[family]) or 0
+                        local ok3, cost = pcall(MineConfig.GetSkillCost, zone, lvl, family)
+                        if ok3 and type(cost) == "number" then
+                            table.insert(out, {
+                                key   = key,
+                                cost  = cost,
+                                label = zone .. " " .. tostring(node.Name or node.Id),
+                                fire  = function()
+                                    GamestateEvent:FireServer("MineBuySkill", zone, family, node.Id)
+                                end,
+                                level = function(m)
+                                    local s = m.Skills and m.Skills[zone]
+                                    return s and tonumber(s[family]) or 0
+                                end,
+                            })
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    table.sort(out, function(a, b) return a.cost < b.cost end)
+    return out
+end
+
+--- Buy the cheapest affordable upgrade. Confirms the level actually went
+--- up; anything the server refuses (prereq, team power, etc.) is parked
+--- for REFUSE_COOLDOWN seconds so it is not spammed.
+--- Returns bought, candidate, refused.
+local function buyOne()
+    local d = getData()
+    local mine = d and d.MineGame
+    if not mine then return false end
+
+    local money = tonumber(d.Money) or 0
+    local list  = buyCandidates(mine)
+    local c = list[1]
+    if not c or c.cost > money then return false end
+
+    local before = c.level(mine)
+    c.fire()
+    task.wait(0.8)
+
+    local d2 = getData()
+    local after = (d2 and d2.MineGame) and c.level(d2.MineGame) or before
+    if after > before then
+        State.Bought = State.Bought + 1
+        State.Spent  = State.Spent + c.cost
+        return true, c, false
+    end
+
+    State.Cooldown[c.key] = os.clock() + REFUSE_COOLDOWN
+    return false, c, true
+end
+
 -- ════════════════════════════════════════════════════════════════
 --  UI
 -- ════════════════════════════════════════════════════════════════
@@ -174,6 +293,7 @@ local COL = {
     loot   = Color3.fromRGB(124, 92, 255),
     sell   = Color3.fromRGB(78, 210, 160),
     travel = Color3.fromRGB(238, 164, 72),
+    buy    = Color3.fromRGB(96, 170, 255),
     text   = Color3.fromRGB(233, 233, 241),
     dim    = Color3.fromRGB(130, 130, 150),
     off    = Color3.fromRGB(52, 52, 64),
@@ -194,7 +314,7 @@ local function corner(p, r)
     local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r); c.Parent = p; return c
 end
 
-local PANEL_H = 318
+local PANEL_H = 388
 
 local Panel = Instance.new("Frame")
 Panel.Name             = "Panel"
@@ -334,7 +454,7 @@ end
 
 -- Stats
 local StatBox = Instance.new("Frame")
-StatBox.Size             = UDim2.new(1, 0, 0, 64)
+StatBox.Size             = UDim2.new(1, 0, 0, 80)
 StatBox.BackgroundColor3 = COL.panel
 StatBox.BorderSizePixel  = 0
 StatBox.LayoutOrder      = 10
@@ -363,6 +483,7 @@ end
 local StatChest = statLine(1)
 local StatSell  = statLine(2)
 local StatCash  = statLine(3)
+local StatBuy   = statLine(4)
 
 local Status = Instance.new("TextLabel")
 Status.Size                   = UDim2.new(1, 0, 0, 16)
@@ -388,6 +509,7 @@ local function refreshStats()
     StatSell.Text  = string.format("Sells         %d     ore types: %d",
         State.Sells, mine and countKeys(mine.Ores) or 0)
     StatCash.Text  = string.format("Earned        $%s", abbreviate(State.Earned))
+    StatBuy.Text   = string.format("Upgrades      %d     spent: $%s", State.Bought, abbreviate(State.Spent))
 end
 
 -- ════════════════════════════════════════════════════════════════
@@ -433,6 +555,22 @@ end)
 
 task.spawn(function()
     while true do
+        local fast = false
+        if State.AutoBuy then
+            local ok, bought, c, refused = pcall(buyOne)
+            if ok and bought then
+                fast = true   -- chain purchases while money lasts
+                setStatus(string.format("bought %s  -$%s", c.label, abbreviate(c.cost)), COL.buy)
+            elseif ok and refused then
+                setStatus(string.format("%s refused, retry in %ds", c.label, REFUSE_COOLDOWN), COL.travel)
+            end
+        end
+        task.wait(fast and 0.3 or State.BuyInterval)
+    end
+end)
+
+task.spawn(function()
+    while true do
         refreshStats()
         task.wait(0.5)
     end
@@ -454,6 +592,11 @@ end)
 makeToggle("Travel to Buyer", "hop there, sell, hop back", 3, COL.travel, true, function(on)
     State.Travel = on
     setStatus(on and "will travel to sell" or "will only sell in range", COL.travel)
+end)
+
+makeToggle("Auto Buy Upgrades", "tap, slots, skill tree — cheapest first", 4, COL.buy, false, function(on)
+    State.AutoBuy = on
+    setStatus(on and "auto buy running" or "auto buy off", on and COL.buy or COL.dim)
 end)
 
 local collapsed = false
