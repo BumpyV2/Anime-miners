@@ -452,7 +452,8 @@ local function buyOne()
     end
     if not c then
         c = list[1]   -- sorted ascending: first is cheapest
-        if not c or c.cost > money then return false end
+        if not c then return false end
+        if c.cost > money then return false, c, false, false, true end
     end
 
     local before = c.level(mine)
@@ -781,11 +782,18 @@ task.spawn(function()
 end)
 
 task.spawn(function()
+    local lastBuyNote
     while true do
         local fast = false
         if State.AutoBuy then
-            local ok, bought, c, refused, pushing = pcall(buyOne)
-            if ok and bought then
+            local ok, bought, c, refused, pushing, saving = pcall(buyOne)
+            if ok and saving and c then
+                local note = string.format("saving for %s  $%s", c.label, abbreviate(c.cost))
+                if note ~= lastBuyNote then
+                    setStatus(note, COL.dim)
+                    lastBuyNote = note
+                end
+            elseif ok and bought then
                 fast = true   -- chain purchases while money lasts
                 if pushing and State.PowerGoal then
                     setStatus(string.format("power %s/%s: %s", abbreviate(teamPower()),
