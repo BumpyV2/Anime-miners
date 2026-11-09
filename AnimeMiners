@@ -101,6 +101,8 @@ local State = {
     Sells        = 0,
     Earned       = 0,
     Busy         = false,   -- guards the travel hop
+    AutoEquip    = false,   -- MineEquipBest after each chest loot
+    LastEquip    = 0,
     AutoBuy      = false,
     BuyInterval  = 1.5,
     Bought       = 0,
@@ -314,7 +316,7 @@ local function corner(p, r)
     local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r); c.Parent = p; return c
 end
 
-local PANEL_H = 388
+local PANEL_H = 442
 
 local Panel = Instance.new("Frame")
 Panel.Name             = "Panel"
@@ -522,6 +524,15 @@ task.spawn(function()
             if ok and fired then
                 State.Chests = State.Chests + 1
                 setStatus(string.format("took %d stack(s) from chest", stacks), COL.loot)
+
+                -- New loot may contain better units: let the game re-pick.
+                -- Same call as the inventory's Equip Best button.
+                if State.AutoEquip and os.clock() - State.LastEquip >= 5 then
+                    task.wait(1)   -- let the loot land in the inventory first
+                    GamestateEvent:FireServer("MineEquipBest")
+                    State.LastEquip = os.clock()
+                    setStatus(string.format("took %d stack(s), equipped best", stacks), COL.loot)
+                end
             end
         end
         task.wait(State.LootInterval)
@@ -584,17 +595,22 @@ makeToggle("Auto Loot Chest", "works anywhere on the map", 1, COL.loot, false, f
     setStatus(on and "auto loot running" or "auto loot off", on and COL.loot or COL.dim)
 end)
 
-makeToggle("Auto Sell Ores", "ores only, never your units", 2, COL.sell, false, function(on)
+makeToggle("Auto Equip Best", "after each chest loot", 2, COL.loot, false, function(on)
+    State.AutoEquip = on
+    setStatus(on and "will equip best after looting" or "auto equip off", on and COL.loot or COL.dim)
+end)
+
+makeToggle("Auto Sell Ores", "ores only, never your units", 3, COL.sell, false, function(on)
     State.AutoSell = on
     setStatus(on and "auto sell running" or "auto sell off", on and COL.sell or COL.dim)
 end)
 
-makeToggle("Travel to Buyer", "hop there, sell, hop back", 3, COL.travel, true, function(on)
+makeToggle("Travel to Buyer", "hop there, sell, hop back", 4, COL.travel, true, function(on)
     State.Travel = on
     setStatus(on and "will travel to sell" or "will only sell in range", COL.travel)
 end)
 
-makeToggle("Auto Buy Upgrades", "tap, slots, skill tree — cheapest first", 4, COL.buy, false, function(on)
+makeToggle("Auto Buy Upgrades", "tap, slots, skill tree — cheapest first", 5, COL.buy, false, function(on)
     State.AutoBuy = on
     setStatus(on and "auto buy running" or "auto buy off", on and COL.buy or COL.dim)
 end)
