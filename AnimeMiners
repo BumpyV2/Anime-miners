@@ -98,8 +98,8 @@ end
 --  STATE
 -- ════════════════════════════════════════════════════════════════
 local State = {
-    AutoLoot     = false,
-    AutoSell     = false,
+    AutoLoot     = true,
+    AutoSell     = true,
     Travel       = true,    -- hop to the buyer when out of range
     LootInterval = 3,
     SellInterval = 10,
@@ -855,7 +855,7 @@ end)
 -- ════════════════════════════════════════════════════════════════
 --  WIRE UP
 -- ════════════════════════════════════════════════════════════════
-makeToggle("Auto Loot Chest", "works anywhere on the map", 1, COL.loot, false, function(on)
+makeToggle("Auto Loot Chest", "works anywhere on the map", 1, COL.loot, true, function(on)
     State.AutoLoot = on
     setStatus(on and "auto loot running" or "auto loot off", on and COL.loot or COL.dim)
 end)
@@ -865,7 +865,7 @@ makeToggle("Auto Equip Best", "after each chest loot", 2, COL.loot, false, funct
     setStatus(on and "will equip best after looting" or "auto equip off", on and COL.loot or COL.dim)
 end)
 
-makeToggle("Auto Sell Ores", "ores only, never your units", 3, COL.sell, false, function(on)
+makeToggle("Auto Sell Ores", "ores only, never your units", 3, COL.sell, true, function(on)
     State.AutoSell = on
     setStatus(on and "auto sell running" or "auto sell off", on and COL.sell or COL.dim)
 end)
