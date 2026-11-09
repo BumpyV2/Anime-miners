@@ -103,6 +103,8 @@ local State = {
     Busy         = false,   -- guards the travel hop
     AutoEquip    = false,   -- MineEquipBest after each chest loot
     LastEquip    = 0,
+    AutoPickaxe  = false,   -- buy + equip the best unlocked pickaxe
+    PickaxesBought = 0,
     AutoBuy      = false,
     BuyInterval  = 1.5,
     Bought       = 0,
@@ -256,6 +258,96 @@ local function buyCandidates(mine)
     return out
 end
 
+-- ── Auto Buy Best Pickaxe ───────────────────────────────────────
+-- Every miner pad (MineGame.Holders) carries one pickaxe. The server
+-- hands a newly bought pickaxe to the weakest miner a few seconds later.
+--   buy  : GamestateEvent:FireServer("MineBuyPickaxe", indexInMineConfig.Pickaxes)
+--          works from anywhere, no need to stand at the shop
+--   stock: GameState.Stocks.Pickaxes.CurrentStock[name].Stock, minus this
+--          player's buys this cycle in data.StockPurchases.Pickaxes
+
+--- Best pickaxe the player's unlocked zones allow, with its list index.
+local function bestPickaxe(mine)
+    local unlocked = mine.UnlockedZones or {}
+    local stockTbl = GameState.Stocks and GameState.Stocks.Pickaxes
+                     and GameState.Stocks.Pickaxes.CurrentStock or {}
+    local best, bestIdx
+    for i, p in ipairs(MineConfig.Pickaxes) do
+        local okO, obtainable = pcall(MineConfig.PickaxeObtainable, p)
+        if okO and obtainable
+            and unlocked[p.ZoneReq]
+            and (tonumber(p.Cost) or 0) > 0       -- skip free/event pickaxes
+            and stockTbl[p.Name] ~= nil           -- only shop pickaxes
+            and (not best or (p.Multiplier or 0) > (best.Multiplier or 0)) then
+            best, bestIdx = p, i
+        end
+    end
+    return best, bestIdx
+end
+
+local function pickaxeStockLeft(d, name)
+    local S = GameState.Stocks and GameState.Stocks.Pickaxes
+    if not S or not S.CurrentStock or not S.CurrentStock[name] then return 0 end
+    local stock = tonumber(S.CurrentStock[name].Stock) or 0
+    local mine = d.StockPurchases and d.StockPurchases.Pickaxes
+    local boughtThisCycle = 0
+    if mine and mine.Purchases and mine.Timestamp == S.BeginningTimestamp then
+        boughtThisCycle = tonumber(mine.Purchases[name]) or 0
+    end
+    return math.max(0, stock - boughtThisCycle)
+end
+
+--- How many miners still lack `name`, minus spares already owned
+--- (those get auto-assigned), so we never overbuy.
+local function pickaxesNeeded(mine, name)
+    local holders, have = 0, 0
+    for _, h in pairs(mine.Holders or {}) do
+        if type(h) == "table" then
+            holders = holders + 1
+            if h.Pickaxe == name then have = have + 1 end
+        end
+    end
+    local owned = tonumber(mine.Pickaxes and mine.Pickaxes[name]) or 0
+    return math.max(0, holders - math.max(have, owned)), have, holders
+end
+
+local pickaxeRefusedUntil = 0
+
+--- Returns status: "bought", "done", "soldout", "poor", "refused", or nil.
+local function buyBestPickaxe()
+    local d = getData()
+    local mine = d and d.MineGame
+    if not mine then return nil end
+
+    local best, idx = bestPickaxe(mine)
+    if not best then return nil end
+
+    local need, have, holders = pickaxesNeeded(mine, best.Name)
+    if need <= 0 then return "done", best, have, holders end
+    if os.clock() < pickaxeRefusedUntil then return "refused", best, have, holders end
+    if pickaxeStockLeft(d, best.Name) <= 0 then return "soldout", best, have, holders end
+    if (tonumber(d.Money) or 0) < (tonumber(best.Cost) or math.huge) then
+        return "poor", best, have, holders
+    end
+
+    local before = tonumber(mine.Pickaxes and mine.Pickaxes[best.Name]) or 0
+    GamestateEvent:FireServer("MineBuyPickaxe", idx)
+    task.wait(1)
+
+    local d2 = getData()
+    local after = d2 and d2.MineGame and d2.MineGame.Pickaxes
+                  and tonumber(d2.MineGame.Pickaxes[best.Name]) or before
+    if after > before then
+        State.PickaxesBought = State.PickaxesBought + 1
+        -- The server assigns it on its own; Equip Best just hurries it along.
+        GamestateEvent:FireServer("MineEquipBest")
+        return "bought", best, have + 1, holders
+    end
+
+    pickaxeRefusedUntil = os.clock() + 30
+    return "refused", best, have, holders
+end
+
 --- Buy the cheapest affordable upgrade. Confirms the level actually went
 --- up; anything the server refuses (prereq, team power, etc.) is parked
 --- for REFUSE_COOLDOWN seconds so it is not spammed.
@@ -316,7 +408,7 @@ local function corner(p, r)
     local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r); c.Parent = p; return c
 end
 
-local PANEL_H = 442
+local PANEL_H = 512
 
 local Panel = Instance.new("Frame")
 Panel.Name             = "Panel"
@@ -456,7 +548,7 @@ end
 
 -- Stats
 local StatBox = Instance.new("Frame")
-StatBox.Size             = UDim2.new(1, 0, 0, 80)
+StatBox.Size             = UDim2.new(1, 0, 0, 96)
 StatBox.BackgroundColor3 = COL.panel
 StatBox.BorderSizePixel  = 0
 StatBox.LayoutOrder      = 10
@@ -486,6 +578,7 @@ local StatChest = statLine(1)
 local StatSell  = statLine(2)
 local StatCash  = statLine(3)
 local StatBuy   = statLine(4)
+local StatPick  = statLine(5)
 
 local Status = Instance.new("TextLabel")
 Status.Size                   = UDim2.new(1, 0, 0, 16)
@@ -512,6 +605,17 @@ local function refreshStats()
         State.Sells, mine and countKeys(mine.Ores) or 0)
     StatCash.Text  = string.format("Earned        $%s", abbreviate(State.Earned))
     StatBuy.Text   = string.format("Upgrades      %d     spent: $%s", State.Bought, abbreviate(State.Spent))
+
+    local pickText = "Pickaxes      -"
+    if mine then
+        local ok, best = pcall(bestPickaxe, mine)
+        if ok and best then
+            local _, have, holders = pickaxesNeeded(mine, best.Name)
+            pickText = string.format("Pickaxes      %d     %s %d/%d",
+                State.PickaxesBought, tostring(best.Name):gsub(" Pickaxe", ""), have, holders)
+        end
+    end
+    StatPick.Text = pickText
 end
 
 -- ════════════════════════════════════════════════════════════════
@@ -581,6 +685,37 @@ task.spawn(function()
 end)
 
 task.spawn(function()
+    local lastNote
+    while true do
+        if State.AutoPickaxe then
+            local ok, result, best, have, holders = pcall(buyBestPickaxe)
+            if ok and best then
+                local short = tostring(best.Name):gsub(" Pickaxe", "")
+                local msg, col
+                if result == "bought" then
+                    msg, col = string.format("bought %s pickaxe (%d/%d miners)", short, have, holders), COL.buy
+                elseif result == "done" then
+                    msg, col = string.format("all %d miners have %s", holders, short), COL.dim
+                elseif result == "soldout" then
+                    msg, col = string.format("%s sold out, waiting for restock", short), COL.dim
+                elseif result == "poor" then
+                    msg, col = string.format("saving for %s ($%s)", short, abbreviate(best.Cost)), COL.dim
+                elseif result == "refused" then
+                    msg, col = string.format("%s buy refused, retry in 30s", short), COL.travel
+                end
+                if msg and (result == "bought" or msg ~= lastNote) then
+                    setStatus(msg, col)
+                    lastNote = msg
+                end
+            end
+            task.wait((ok and result == "bought") and 1 or 3)
+        else
+            task.wait(3)
+        end
+    end
+end)
+
+task.spawn(function()
     while true do
         refreshStats()
         task.wait(0.5)
@@ -613,6 +748,11 @@ end)
 makeToggle("Auto Buy Upgrades", "tap, slots, skill tree — cheapest first", 5, COL.buy, false, function(on)
     State.AutoBuy = on
     setStatus(on and "auto buy running" or "auto buy off", on and COL.buy or COL.dim)
+end)
+
+makeToggle("Auto Best Pickaxe", "buy best unlocked, onto every miner", 6, COL.buy, false, function(on)
+    State.AutoPickaxe = on
+    setStatus(on and "auto pickaxe running" or "auto pickaxe off", on and COL.buy or COL.dim)
 end)
 
 local collapsed = false
