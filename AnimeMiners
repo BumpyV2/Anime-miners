@@ -1,13 +1,21 @@
 --[[
-    AnimeMiners Enhanced
-    Auto Loot Chest + Auto Sell  —  100% remote, no walking, no teleporting,
-    no proximity prompts, no UI clicking.
-
-    Both features talk straight to the game's own network layer:
-        ReplicatedStorage.Remotes.GamestateEvent:FireServer("MineTakeChest")
-        ReplicatedStorage.Remotes.GamestateEvent:FireServer("MineSellItems", { keys })
-
+    AnimeMiners Enhanced  —  Auto Loot Chest + Auto Sell
     github.com/BumpyV2/Anime-miners
+
+    How it talks to the game (all verified live, no guessing):
+
+      Remotes.GamestateEvent:FireServer("MineTakeChest")
+          Empties the loot chest into your ores. Works from anywhere
+          on the map — no walking, no prompt, fully remote.
+
+      Remotes.GamestateEvent:FireServer("MineSellItems", { sorted keys })
+          Sells the listed keys. The SERVER requires you to be stood at
+          the Item Buyer ("Walk up to the item buyer to sell."), so this
+          one cannot be done from range. With "Travel to Buyer" on, the
+          script hops you there, sells, and puts you back where you were.
+
+    Uses no executor hooks of any kind — no metamethod hooks, no remote
+    spy, no fireproximityprompt. Those are what trip namecall detectors.
 --]]
 
 local Players           = game:GetService("Players")
@@ -18,21 +26,47 @@ local UserInputService  = game:GetService("UserInputService")
 local lp = Players.LocalPlayer
 
 -- ════════════════════════════════════════════════════════════════
---  GAME BINDINGS  (verified against the live client)
+--  GAME BINDINGS
 -- ════════════════════════════════════════════════════════════════
-local GamestateEvent = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("GamestateEvent")
+local Remotes        = ReplicatedStorage:WaitForChild("Remotes")
+local GamestateEvent = Remotes:WaitForChild("GamestateEvent")
 local GameState      = require(ReplicatedStorage:WaitForChild("Modules"):WaitForChild("GameState"))
 
--- GetData returns a LIVE reference to the player's data table.
+local SELL_RANGE     = 12      -- server's own prompt range is 14
+local SELL_OFFSET    = 4       -- how far in front of the buyer we land
+
 local function getData()
-    local ok, data = pcall(GameState.GetData, lp)
-    if ok and type(data) == "table" then return data end
+    local ok, d = pcall(GameState.GetData, lp)
+    if ok and type(d) == "table" then return d end
     return nil
 end
 
 local function getMine()
     local d = getData()
     return d and d.MineGame or nil
+end
+
+local function getRoot()
+    local c = lp.Character
+    return c and c:FindFirstChild("HumanoidRootPart") or nil
+end
+
+--- The Item Buyer's torso, which carries the SellPrompt.
+local function getBuyerPart()
+    local stand = workspace:FindFirstChild("SellStand")
+    if stand then
+        for _, v in ipairs(stand:GetDescendants()) do
+            if v:IsA("ProximityPrompt") and v.Name == "SellPrompt" then
+                if v.Parent and v.Parent:IsA("BasePart") then return v.Parent end
+            end
+        end
+    end
+    for _, v in ipairs(workspace:GetDescendants()) do
+        if v:IsA("ProximityPrompt") and v.Name == "SellPrompt" then
+            if v.Parent and v.Parent:IsA("BasePart") then return v.Parent end
+        end
+    end
+    return nil
 end
 
 -- ════════════════════════════════════════════════════════════════
@@ -43,9 +77,8 @@ local SUFFIX = { "", "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc
 local function abbreviate(n)
     n = tonumber(n) or 0
     if n < 1000 then return string.format("%d", n) end
-    local i = math.floor(math.log(n, 1000))
-    i = math.clamp(i, 1, #SUFFIX - 1)
-    return string.format("%.1f%s", n / (1000 ^ i), SUFFIX[i + 1])
+    local i = math.clamp(math.floor(math.log(n, 1000)), 1, #SUFFIX - 1)
+    return string.format("%.2f%s", n / (1000 ^ i), SUFFIX[i + 1])
 end
 
 local function countKeys(t)
@@ -55,124 +88,141 @@ local function countKeys(t)
 end
 
 -- ════════════════════════════════════════════════════════════════
---  CORE ACTIONS
--- ════════════════════════════════════════════════════════════════
-
---- Pull everything sitting in the loot chest into the inventory.
---- Mirrors MineChestClient's TakeButton: only fires when the chest is non-empty.
-local function takeChest()
-    local mine = getMine()
-    if not mine or type(mine.Chest) ~= "table" then return false, 0 end
-
-    local items = countKeys(mine.Chest)
-    if items == 0 then return false, 0 end
-
-    GamestateEvent:FireServer("MineTakeChest")
-    return true, items
-end
-
---- Sell ores. Mirrors MineSellClient: a sorted array of entry Keys.
---- Only Kind == "Ore" is ever included, so characters, pickaxes and
---- gear are never touched.
-local function sellOres(skipRarities)
-    local mine = getMine()
-    if not mine or type(mine.Ores) ~= "table" then return false, 0 end
-
-    local keys = {}
-    for oreName, amount in pairs(mine.Ores) do
-        if (tonumber(amount) or 0) > 0 and not (skipRarities and skipRarities[oreName]) then
-            table.insert(keys, oreName)
-        end
-    end
-
-    if #keys == 0 then return false, 0 end
-    table.sort(keys)
-
-    GamestateEvent:FireServer("MineSellItems", keys)
-    return true, #keys
-end
-
--- ════════════════════════════════════════════════════════════════
 --  STATE
 -- ════════════════════════════════════════════════════════════════
 local State = {
-    AutoLoot        = false,
-    AutoSell        = false,
-    LootInterval    = 3,
-    SellInterval    = 5,
-    ChestsLooted    = 0,
-    OresSold        = 0,
-    MoneyEarned     = 0,
+    AutoLoot     = false,
+    AutoSell     = false,
+    Travel       = true,    -- hop to the buyer when out of range
+    LootInterval = 3,
+    SellInterval = 10,
+    Chests       = 0,
+    Sells        = 0,
+    Earned       = 0,
+    Busy         = false,   -- guards the travel hop
 }
+
+-- ════════════════════════════════════════════════════════════════
+--  ACTIONS
+-- ════════════════════════════════════════════════════════════════
+
+--- Empty the loot chest. Remote-only, works anywhere.
+local function takeChest()
+    local mine = getMine()
+    if not mine or type(mine.Chest) ~= "table" then return false, 0 end
+    local stacks = countKeys(mine.Chest)
+    if stacks == 0 then return false, 0 end
+    GamestateEvent:FireServer("MineTakeChest")
+    return true, stacks
+end
+
+--- Build the sell payload: ore names only, so characters, pickaxes
+--- and gear are never included.
+local function oreKeys()
+    local mine = getMine()
+    if not mine or type(mine.Ores) ~= "table" then return {} end
+    local keys = {}
+    for name, amount in pairs(mine.Ores) do
+        if (tonumber(amount) or 0) > 0 then table.insert(keys, name) end
+    end
+    table.sort(keys)
+    return keys
+end
+
+--- Sell every ore. Returns fired, numKeys, moved.
+local function sellOres()
+    local keys = oreKeys()
+    if #keys == 0 then return false, 0, false end
+
+    local root  = getRoot()
+    local buyer = getBuyerPart()
+    if not root or not buyer then return false, 0, false end
+
+    local inRange = (root.Position - buyer.Position).Magnitude <= SELL_RANGE
+
+    if inRange then
+        GamestateEvent:FireServer("MineSellItems", keys)
+        return true, #keys, false
+    end
+
+    if not State.Travel then return false, #keys, false end
+    if State.Busy then return false, #keys, false end
+
+    -- Hop over, sell, hop back.
+    State.Busy = true
+    local saved = root.CFrame
+    local okTrip = pcall(function()
+        root.CFrame = CFrame.new(buyer.Position) * CFrame.new(0, 0, SELL_OFFSET)
+        task.wait(0.75)
+        GamestateEvent:FireServer("MineSellItems", keys)
+        task.wait(1.0)
+    end)
+    -- Always try to put the character back, even if the sell errored.
+    local root2 = getRoot()
+    if root2 and saved then pcall(function() root2.CFrame = saved end) end
+    State.Busy = false
+
+    return okTrip, #keys, true
+end
 
 -- ════════════════════════════════════════════════════════════════
 --  UI
 -- ════════════════════════════════════════════════════════════════
 local COL = {
-    bg      = Color3.fromRGB(16, 16, 22),
-    panel   = Color3.fromRGB(26, 26, 34),
-    accent  = Color3.fromRGB(124, 92, 255),
-    accent2 = Color3.fromRGB(78, 210, 160),
-    text    = Color3.fromRGB(232, 232, 240),
-    dim     = Color3.fromRGB(132, 132, 152),
-    off     = Color3.fromRGB(52, 52, 64),
+    bg     = Color3.fromRGB(16, 16, 22),
+    panel  = Color3.fromRGB(27, 27, 35),
+    loot   = Color3.fromRGB(124, 92, 255),
+    sell   = Color3.fromRGB(78, 210, 160),
+    travel = Color3.fromRGB(238, 164, 72),
+    text   = Color3.fromRGB(233, 233, 241),
+    dim    = Color3.fromRGB(130, 130, 150),
+    off    = Color3.fromRGB(52, 52, 64),
 }
 
--- Remove a previous copy if the script is re-run
-local old = lp.PlayerGui:FindFirstChild("AnimeMinersEnhanced")
+local old = lp:WaitForChild("PlayerGui"):FindFirstChild("AnimeMinersEnhanced")
 if old then old:Destroy() end
 
 local Gui = Instance.new("ScreenGui")
-Gui.Name             = "AnimeMinersEnhanced"
-Gui.ResetOnSpawn     = false
-Gui.IgnoreGuiInset   = true
-Gui.ZIndexBehavior   = Enum.ZIndexBehavior.Sibling
-Gui.DisplayOrder     = 9999
-Gui.Parent           = lp:WaitForChild("PlayerGui")
+Gui.Name           = "AnimeMinersEnhanced"
+Gui.ResetOnSpawn   = false
+Gui.IgnoreGuiInset = true
+Gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+Gui.DisplayOrder   = 9999
+Gui.Parent         = lp.PlayerGui
 
-local function corner(parent, r)
-    local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, r or 8)
-    c.Parent = parent
-    return c
+local function corner(p, r)
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r); c.Parent = p; return c
 end
 
-local function stroke(parent, col, thick)
-    local s = Instance.new("UIStroke")
-    s.Color = col
-    s.Thickness = thick or 1
-    s.Transparency = 0.4
-    s.Parent = parent
-    return s
-end
+local PANEL_H = 318
 
--- ── Panel ───────────────────────────────────────────────────────
 local Panel = Instance.new("Frame")
-Panel.Name             = "Panel"
-Panel.Size             = UDim2.fromOffset(248, 272)
-Panel.Position         = UDim2.new(0, 20, 0.5, -136)
+Panel.Size             = UDim2.fromOffset(252, PANEL_H)
+Panel.Position         = UDim2.new(0, 20, 0.5, -PANEL_H / 2)
 Panel.BackgroundColor3 = COL.bg
 Panel.BorderSizePixel  = 0
 Panel.Active           = true
 Panel.Draggable        = true
 Panel.Parent           = Gui
 corner(Panel, 12)
-stroke(Panel, COL.accent, 1.5)
 
--- ── Header ──────────────────────────────────────────────────────
+local ps = Instance.new("UIStroke")
+ps.Color = COL.loot; ps.Thickness = 1.5; ps.Transparency = 0.35; ps.Parent = Panel
+
+-- Header
 local Header = Instance.new("Frame")
 Header.Size             = UDim2.new(1, 0, 0, 40)
-Header.BackgroundColor3 = COL.accent
+Header.BackgroundColor3 = COL.loot
 Header.BorderSizePixel  = 0
 Header.Parent           = Panel
 corner(Header, 12)
 
-local HeaderFoot = Instance.new("Frame")      -- squares off the bottom corners
-HeaderFoot.Size             = UDim2.new(1, 0, 0, 12)
-HeaderFoot.Position         = UDim2.new(0, 0, 1, -12)
-HeaderFoot.BackgroundColor3 = COL.accent
-HeaderFoot.BorderSizePixel  = 0
-HeaderFoot.Parent           = Header
+local Foot = Instance.new("Frame")
+Foot.Size             = UDim2.new(1, 0, 0, 12)
+Foot.Position         = UDim2.new(0, 0, 1, -12)
+Foot.BackgroundColor3 = COL.loot
+Foot.BorderSizePixel  = 0
+Foot.Parent           = Header
 
 local Title = Instance.new("TextLabel")
 Title.Size                   = UDim2.new(1, -56, 1, 0)
@@ -186,37 +236,35 @@ Title.TextXAlignment         = Enum.TextXAlignment.Left
 Title.ZIndex                 = 2
 Title.Parent                 = Header
 
-local Minimize = Instance.new("TextButton")
-Minimize.Size                   = UDim2.fromOffset(26, 26)
-Minimize.Position               = UDim2.new(1, -34, 0, 7)
-Minimize.BackgroundColor3       = Color3.fromRGB(255, 255, 255)
-Minimize.BackgroundTransparency = 0.82
-Minimize.Text                   = "–"
-Minimize.TextColor3             = Color3.new(1, 1, 1)
-Minimize.TextSize               = 18
-Minimize.Font                   = Enum.Font.GothamBold
-Minimize.AutoButtonColor        = false
-Minimize.ZIndex                 = 2
-Minimize.Parent                 = Header
-corner(Minimize, 7)
+local Min = Instance.new("TextButton")
+Min.Size                   = UDim2.fromOffset(26, 26)
+Min.Position               = UDim2.new(1, -34, 0, 7)
+Min.BackgroundColor3       = Color3.new(1, 1, 1)
+Min.BackgroundTransparency = 0.82
+Min.Text                   = "–"
+Min.TextColor3             = Color3.new(1, 1, 1)
+Min.TextSize               = 18
+Min.Font                   = Enum.Font.GothamBold
+Min.AutoButtonColor        = false
+Min.ZIndex                 = 2
+Min.Parent                 = Header
+corner(Min, 7)
 
--- ── Body ────────────────────────────────────────────────────────
+-- Body
 local Body = Instance.new("Frame")
-Body.Name                  = "Body"
-Body.Size                  = UDim2.new(1, -24, 1, -52)
-Body.Position              = UDim2.fromOffset(12, 48)
+Body.Size                   = UDim2.new(1, -24, 1, -52)
+Body.Position               = UDim2.fromOffset(12, 48)
 Body.BackgroundTransparency = 1
-Body.Parent                = Panel
+Body.Parent                 = Panel
 
-local List = Instance.new("UIListLayout")
-List.SortOrder = Enum.SortOrder.LayoutOrder
-List.Padding   = UDim.new(0, 8)
-List.Parent    = Body
+local L = Instance.new("UIListLayout")
+L.SortOrder = Enum.SortOrder.LayoutOrder
+L.Padding   = UDim.new(0, 8)
+L.Parent    = Body
 
---- Build a labelled toggle row. Returns a setter so other code can flip it.
-local function makeToggle(label, order, accent, callback)
+local function makeToggle(label, sub, order, accent, default, callback)
     local Row = Instance.new("Frame")
-    Row.Size             = UDim2.new(1, 0, 0, 40)
+    Row.Size             = UDim2.new(1, 0, 0, sub and 46 or 40)
     Row.BackgroundColor3 = COL.panel
     Row.BorderSizePixel  = 0
     Row.LayoutOrder      = order
@@ -224,8 +272,8 @@ local function makeToggle(label, order, accent, callback)
     corner(Row, 9)
 
     local Lbl = Instance.new("TextLabel")
-    Lbl.Size                   = UDim2.new(1, -66, 1, 0)
-    Lbl.Position               = UDim2.fromOffset(12, 0)
+    Lbl.Size                   = UDim2.new(1, -66, 0, 16)
+    Lbl.Position               = UDim2.fromOffset(12, sub and 7 or 12)
     Lbl.BackgroundTransparency = 1
     Lbl.Text                   = label
     Lbl.TextColor3             = COL.text
@@ -233,6 +281,19 @@ local function makeToggle(label, order, accent, callback)
     Lbl.Font                   = Enum.Font.GothamMedium
     Lbl.TextXAlignment         = Enum.TextXAlignment.Left
     Lbl.Parent                 = Row
+
+    if sub then
+        local S = Instance.new("TextLabel")
+        S.Size                   = UDim2.new(1, -66, 0, 13)
+        S.Position               = UDim2.fromOffset(12, 24)
+        S.BackgroundTransparency = 1
+        S.Text                   = sub
+        S.TextColor3             = COL.dim
+        S.TextSize               = 10.5
+        S.Font                   = Enum.Font.Gotham
+        S.TextXAlignment         = Enum.TextXAlignment.Left
+        S.Parent                 = Row
+    end
 
     local Track = Instance.new("TextButton")
     Track.Size             = UDim2.fromOffset(42, 22)
@@ -253,44 +314,40 @@ local function makeToggle(label, order, accent, callback)
     corner(Knob, 8)
 
     local on = false
-    local function apply(v, fire)
+    local function apply(v, silent)
         on = v
-        TweenService:Create(Track, TweenInfo.new(0.16), {
-            BackgroundColor3 = on and accent or COL.off,
-        }):Play()
+        TweenService:Create(Track, TweenInfo.new(0.16),
+            { BackgroundColor3 = on and accent or COL.off }):Play()
         TweenService:Create(Knob, TweenInfo.new(0.16, Enum.EasingStyle.Quad), {
-            Position        = on and UDim2.fromOffset(23, 3) or UDim2.fromOffset(3, 3),
+            Position         = on and UDim2.fromOffset(23, 3) or UDim2.fromOffset(3, 3),
             BackgroundColor3 = on and Color3.new(1, 1, 1) or Color3.fromRGB(170, 170, 188),
         }):Play()
-        if fire ~= false then callback(on) end
+        if not silent then callback(on) end
     end
 
     Track.MouseButton1Click:Connect(function() apply(not on) end)
+    if default then apply(true, true) end
     return apply
 end
 
--- ── Stats ───────────────────────────────────────────────────────
+-- Stats
 local StatBox = Instance.new("Frame")
-StatBox.Size             = UDim2.new(1, 0, 0, 62)
+StatBox.Size             = UDim2.new(1, 0, 0, 64)
 StatBox.BackgroundColor3 = COL.panel
 StatBox.BorderSizePixel  = 0
 StatBox.LayoutOrder      = 10
 StatBox.Parent           = Body
 corner(StatBox, 9)
 
-local StatPad = Instance.new("UIPadding")
-StatPad.PaddingTop    = UDim.new(0, 8)
-StatPad.PaddingLeft   = UDim.new(0, 12)
-StatPad.PaddingRight  = UDim.new(0, 12)
-StatPad.Parent        = StatBox
+local sp = Instance.new("UIPadding")
+sp.PaddingTop = UDim.new(0, 9); sp.PaddingLeft = UDim.new(0, 12)
+sp.PaddingRight = UDim.new(0, 12); sp.Parent = StatBox
 
-local StatList = Instance.new("UIListLayout")
-StatList.Padding = UDim.new(0, 3)
-StatList.Parent  = StatBox
+local sl = Instance.new("UIListLayout"); sl.Padding = UDim.new(0, 3); sl.Parent = StatBox
 
 local function statLine(order)
     local l = Instance.new("TextLabel")
-    l.Size                   = UDim2.new(1, 0, 0, 15)
+    l.Size                   = UDim2.new(1, 0, 0, 14)
     l.BackgroundTransparency = 1
     l.TextColor3             = COL.dim
     l.TextSize               = 11.5
@@ -302,10 +359,9 @@ local function statLine(order)
 end
 
 local StatChest = statLine(1)
-local StatSold  = statLine(2)
+local StatSell  = statLine(2)
 local StatCash  = statLine(3)
 
--- ── Status ──────────────────────────────────────────────────────
 local Status = Instance.new("TextLabel")
 Status.Size                   = UDim2.new(1, 0, 0, 16)
 Status.BackgroundTransparency = 1
@@ -318,38 +374,30 @@ Status.TextTruncate           = Enum.TextTruncate.AtEnd
 Status.LayoutOrder            = 11
 Status.Parent                 = Body
 
-local function setStatus(msg, good)
-    Status.Text      = msg
-    Status.TextColor3 = good and COL.accent2 or COL.dim
+local function setStatus(msg, col)
+    Status.Text       = msg
+    Status.TextColor3 = col or COL.dim
 end
 
 local function refreshStats()
     local mine = getMine()
-    local pending = mine and countKeys(mine.Chest) or 0
-    local ores    = mine and countKeys(mine.Ores) or 0
-
-    StatChest.Text = string.format("Chests taken   %d    (in chest: %d)", State.ChestsLooted, pending)
-    StatSold.Text  = string.format("Sell batches   %d    (ore types: %d)", State.OresSold, ores)
-    StatCash.Text  = string.format("Earned         $%s", abbreviate(State.MoneyEarned))
+    StatChest.Text = string.format("Chests taken  %d     in chest: %d",
+        State.Chests, mine and countKeys(mine.Chest) or 0)
+    StatSell.Text  = string.format("Sells         %d     ore types: %d",
+        State.Sells, mine and countKeys(mine.Ores) or 0)
+    StatCash.Text  = string.format("Earned        $%s", abbreviate(State.Earned))
 end
 
 -- ════════════════════════════════════════════════════════════════
 --  LOOPS
 -- ════════════════════════════════════════════════════════════════
-local function trackEarnings(before)
-    local d = getData()
-    if not d then return end
-    local gained = (d.Money or 0) - before
-    if gained > 0 then State.MoneyEarned = State.MoneyEarned + gained end
-end
-
 task.spawn(function()
     while true do
         if State.AutoLoot then
-            local ok, fired, count = pcall(takeChest)
+            local ok, fired, stacks = pcall(takeChest)
             if ok and fired then
-                State.ChestsLooted = State.ChestsLooted + 1
-                setStatus(string.format("took %d stack(s) from chest", count), true)
+                State.Chests = State.Chests + 1
+                setStatus(string.format("took %d stack(s) from chest", stacks), COL.loot)
             end
         end
         task.wait(State.LootInterval)
@@ -359,14 +407,22 @@ end)
 task.spawn(function()
     while true do
         if State.AutoSell then
-            local d = getData()
-            local before = d and d.Money or 0
-            local ok, fired, n = pcall(sellOres)
+            local before = (getData() or {}).Money or 0
+            local ok, fired, n, moved = pcall(sellOres)
             if ok and fired then
-                State.OresSold = State.OresSold + 1
-                task.wait(0.6)
-                trackEarnings(before)
-                setStatus(string.format("sold %d ore type(s)", n), true)
+                task.wait(0.5)
+                local after = (getData() or {}).Money or 0
+                local gained = after - before
+                if gained > 0 then
+                    State.Sells  = State.Sells + 1
+                    State.Earned = State.Earned + gained
+                    setStatus(string.format("sold %d ore type(s)  +$%s%s",
+                        n, abbreviate(gained), moved and "  (travelled)" or ""), COL.sell)
+                else
+                    setStatus("sell refused — are you at the Item Buyer?", COL.travel)
+                end
+            elseif ok and n and n > 0 and not State.Travel then
+                setStatus("ores waiting — enable Travel to Buyer", COL.travel)
             end
         end
         task.wait(State.SellInterval)
@@ -383,31 +439,33 @@ end)
 -- ════════════════════════════════════════════════════════════════
 --  WIRE UP
 -- ════════════════════════════════════════════════════════════════
-makeToggle("Auto Loot Chest", 1, COL.accent, function(on)
+makeToggle("Auto Loot Chest", "works anywhere on the map", 1, COL.loot, false, function(on)
     State.AutoLoot = on
-    setStatus(on and "auto loot running" or "auto loot off", on)
+    setStatus(on and "auto loot running" or "auto loot off", on and COL.loot or COL.dim)
 end)
 
-makeToggle("Auto Sell Ores", 2, COL.accent2, function(on)
+makeToggle("Auto Sell Ores", "ores only, never your units", 2, COL.sell, false, function(on)
     State.AutoSell = on
-    setStatus(on and "auto sell running" or "auto sell off", on)
+    setStatus(on and "auto sell running" or "auto sell off", on and COL.sell or COL.dim)
 end)
 
--- Minimize / restore
+makeToggle("Travel to Buyer", "hop there, sell, hop back", 3, COL.travel, true, function(on)
+    State.Travel = on
+    setStatus(on and "will travel to sell" or "will only sell in range", COL.travel)
+end)
+
 local collapsed = false
-Minimize.MouseButton1Click:Connect(function()
+Min.MouseButton1Click:Connect(function()
     collapsed = not collapsed
     Body.Visible = not collapsed
-    Minimize.Text = collapsed and "+" or "–"
+    Min.Text = collapsed and "+" or "–"
     TweenService:Create(Panel, TweenInfo.new(0.18, Enum.EasingStyle.Quad), {
-        Size = collapsed and UDim2.fromOffset(248, 40) or UDim2.fromOffset(248, 272),
+        Size = collapsed and UDim2.fromOffset(252, 40) or UDim2.fromOffset(252, PANEL_H),
     }):Play()
 end)
 
--- RightShift hides the whole panel
 UserInputService.InputBegan:Connect(function(input, processed)
-    if processed then return end
-    if input.KeyCode == Enum.KeyCode.RightShift then
+    if not processed and input.KeyCode == Enum.KeyCode.RightShift then
         Panel.Visible = not Panel.Visible
     end
 end)
