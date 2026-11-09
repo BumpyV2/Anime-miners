@@ -197,6 +197,7 @@ end
 local PANEL_H = 318
 
 local Panel = Instance.new("Frame")
+Panel.Name             = "Panel"
 Panel.Size             = UDim2.fromOffset(252, PANEL_H)
 Panel.Position         = UDim2.new(0, 20, 0.5, -PANEL_H / 2)
 Panel.BackgroundColor3 = COL.bg
@@ -252,6 +253,7 @@ corner(Min, 7)
 
 -- Body
 local Body = Instance.new("Frame")
+Body.Name                   = "Body"
 Body.Size                   = UDim2.new(1, -24, 1, -52)
 Body.Position               = UDim2.fromOffset(12, 48)
 Body.BackgroundTransparency = 1
